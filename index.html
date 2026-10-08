@@ -201,6 +201,9 @@ footer a,.linkbtn{color:var(--mute);text-decoration:underline}
           <label class="chip"><input type="checkbox" value="restaurant" checked><span>餐廳</span></label>
           <label class="chip"><input type="checkbox" value="cafe" checked><span>咖啡飲品</span></label>
           <label class="chip"><input type="checkbox" value="food_court" checked><span>美食街</span></label>
+          <label class="chip"><input type="checkbox" value="sweet" checked><span>麵包甜點</span></label>
+          <label class="chip"><input type="checkbox" value="bar"><span>酒吧</span></label>
+          <label class="chip"><input type="checkbox" value="cvs"><span>便利商店</span></label>
         </div>
       </div>
       <div class="frow">
@@ -317,12 +320,20 @@ const CUISINE_ZH = {
   pasta:'義大利麵', curry:'咖哩', donburi:'丼飯', izakaya:'居酒屋', tempura:'天婦羅', teppanyaki:'鐵板燒', sandwiches:'三明治',
   soup:'湯品', congee:'粥', fast_food:'速食', cafe:'咖啡', juice:'果汁', salad:'沙拉', mexican:'墨西哥', greek:'希臘', german:'德式'
 };
-const TYPE_ZH = { fast_food:'小吃速食', restaurant:'餐廳', cafe:'咖啡飲品', food_court:'美食街' };
+const TYPE_ZH = { fast_food:'小吃速食', restaurant:'餐廳', cafe:'咖啡飲品', food_court:'美食街', sweet:'麵包甜點', bar:'酒吧', cvs:'便利商店' };
+// OSM 標籤 → 網頁上的類型（手搖飲、麵包店在 OSM 是 shop，不是 amenity）
+const KIND = {
+  'amenity=restaurant':'restaurant', 'amenity=fast_food':'fast_food', 'amenity=cafe':'cafe', 'amenity=food_court':'food_court',
+  'amenity=ice_cream':'sweet', 'amenity=bar':'bar', 'amenity=pub':'bar',
+  'shop=beverages':'cafe', 'shop=tea':'cafe', 'shop=coffee':'cafe', 'shop=deli':'fast_food',
+  'shop=bakery':'sweet', 'shop=pastry':'sweet', 'shop=confectionery':'sweet', 'shop=convenience':'cvs'
+};
 const PRICE3 = new Set(['steak_house','hotpot','barbecue','seafood','sushi','french','teppanyaki','izakaya','korean_bbq']);
 const PRICE1 = new Set(['noodle','beef_noodle','dumplings','rice','breakfast','taiwanese','chicken','fried_chicken','sandwich','sandwiches','burger','bubble_tea','snack','local','regional','congee','soup','donburi','tea','juice','ice_cream']);
-function estPrice(amenity, cuisines){
+function estPrice(type, cuisines, shop){
   if (cuisines.some(c => PRICE3.has(c))) return 3;
-  if (amenity === 'fast_food' || amenity === 'food_court') return 1;
+  if (['fast_food','food_court','sweet','cvs'].includes(type) || shop === 'beverages' || shop === 'tea') return 1;
+  if (type === 'bar') return 3;
   if (cuisines.some(c => PRICE1.has(c))) return 1;
   return 2;
 }
@@ -333,10 +344,13 @@ function toPlace(el){
   const lat = el.lat ?? el.center?.lat, lon = el.lon ?? el.center?.lon;
   if (lat == null || lon == null) return null;
   const raw = (t.cuisine || '').split(';').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const type = KIND['amenity=' + t.amenity] || KIND['shop=' + t.shop];
+  if (!type) return null;
+  if (t.shop === 'beverages' && !raw.length) raw.push('bubble_tea');
   return {
-    id: el.type + el.id, name, type: t.amenity, lat, lon,
+    id: el.type + el.id, name, type, lat, lon,
     cuisines: [...new Set(raw)],
-    price: estPrice(t.amenity, raw),
+    price: estPrice(type, raw, t.shop),
     hours: t.opening_hours || '',
     street: t['addr:street'] || '', branch: t.branch || ''
   };
@@ -418,7 +432,7 @@ async function overpass(q){
 }
 
 /* ---------- 快取：同一地點 24 小時內直接用上次的店家清單 ---------- */
-const CACHE_KEY = 'nearby-lunch-cache', CACHE_MS = 24 * 3600 * 1000;
+const CACHE_KEY = 'nearby-lunch-cache-v2', CACHE_MS = 24 * 3600 * 1000;
 function cacheGet(c, R){
   try{
     const list = JSON.parse(localStorage.getItem(CACHE_KEY) || '[]');
@@ -450,6 +464,8 @@ const DEMO = [
   ['泰好吃','restaurant',['thai'],'Mo-Su 11:00-21:00',250,-420],
   ['冰心手搖','cafe',['bubble_tea'],'Mo-Su 10:00-22:00',-150,330],
   ['東區美食街','food_court',[],'Mo-Su 11:00-21:00',900,500],
+  ['老街麵包坊','sweet',['bakery'],'Mo-Su 07:00-21:00',-260,-90],
+  ['7-ELEVEN 示範門市','cvs',[],'24/7',40,-30],
   ['夜貓子鹹酥雞','fast_food',['fried_chicken'],'Mo-Su 17:00-01:00',-650,-300],
   ['義起來義大利麵','restaurant',['italian','pasta'],'Mo-Su 11:00-15:00,17:00-21:00',420,-340]
 ];
@@ -485,7 +501,9 @@ async function loadPlaces(force){
   }
   setBusy(true); state.loading = true; render();
   setStatus(location.protocol === 'file:' ? '正在找附近的店…直接開檔案時較慢，約 10–30 秒' : '正在找附近的店…', false, true);
-  const q = '[out:json][timeout:25];nwr["amenity"~"^(restaurant|fast_food|cafe|food_court)$"]["name"](around:' + R + ',' + c.lat + ',' + c.lon + ');out center tags 800;';
+  const around = '(around:' + R + ',' + c.lat + ',' + c.lon + ')';
+  const q = '[out:json][timeout:25];(nwr["amenity"~"^(restaurant|fast_food|cafe|food_court|ice_cream|bar|pub)$"]["name"]' + around +
+    ';nwr["shop"~"^(beverages|tea|coffee|deli|bakery|pastry|confectionery|convenience)$"]["name"]' + around + ';);out center tags 1000;';
   try{
     const t0 = Date.now();
     // 公用伺服器忙碌時常回 504，但隔幾秒重試常常就成功，所以最多試 3 次
@@ -616,7 +634,7 @@ function updateSummary(){
   const mode = { open:'只看營業中', openunk:'營業中＋不明', all:'全部時段' }[$('#openMode').value];
   const parts = [fmtDist(+$('#dist').value)];
   parts.push(prices.length === 3 ? '全部價位' : prices.length ? prices.map(n => '$'.repeat(n)).join('/') : '未選價位');
-  if (types.length < 4) parts.push(types.length ? types.map(t => TYPE_ZH[t]).join('/') : '未選類型');
+  if (types.length < document.querySelectorAll('#typeChips input').length) parts.push(types.length ? types.map(t => TYPE_ZH[t]).join('/') : '未選類型');
   if ($('#cuisine').value) parts.push($('#cuisine').value);
   parts.push(mode);
   $('#fsum').textContent = parts.join(' · ');
