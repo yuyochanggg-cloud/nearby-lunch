@@ -90,10 +90,12 @@ select option{background:var(--paper);color:var(--ink)}
 .slip.show{display:block;animation:drop .4s cubic-bezier(.2,.8,.2,1)}
 .slip::before{content:"";position:absolute;inset:6px;border:1px solid rgba(255,240,215,.45);border-radius:2px;pointer-events:none}
 .slip-head{display:flex;justify-content:space-between;font:600 12px/1 var(--sans);letter-spacing:.3em;padding:4px 6px 12px;border-bottom:1px solid rgba(255,240,215,.35)}
-.slip-body{display:flex;gap:18px;padding:16px 6px 6px;min-height:230px}
-.vname{writing-mode:vertical-rl;text-orientation:mixed;font:900 40px/1.15 var(--serif);letter-spacing:.08em;max-height:300px;flex:none}
+/* 籤詩構圖：直書店名在右，印章壓左上，資訊落左下 */
+.slip-body{display:grid;grid-template-columns:1fr auto;gap:0 20px;padding:18px 6px 6px;min-height:250px}
+.vname{grid-column:2;grid-row:1;justify-self:end;writing-mode:vertical-rl;text-orientation:mixed;font:900 clamp(40px,10vw,52px)/1.15 var(--serif);letter-spacing:.1em;max-height:320px;padding-left:20px;border-left:1px solid rgba(255,240,215,.35)}
 .vname.rolling{opacity:.55}
-.side{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;font-size:14.5px}
+.slip-body>.vname:only-child{grid-column:1/-1;justify-self:center;border-left:0;padding-left:0}
+.side{grid-column:1;grid-row:1;min-width:0;display:flex;flex-direction:column;justify-content:space-between;gap:16px;font-size:14.5px}
 .stamp{align-self:flex-start;width:58px;height:58px;display:grid;place-items:center;border:2px solid var(--stamp);color:var(--stamp);font:900 20px/1.05 var(--serif);text-align:center;transform:rotate(-8deg);margin-bottom:4px;letter-spacing:.05em}
 .side dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px}
 .side dt{opacity:.7;font-size:12.5px;letter-spacing:.15em;padding-top:2px}
@@ -335,7 +337,8 @@ function toPlace(el){
     id: el.type + el.id, name, type: t.amenity, lat, lon,
     cuisines: [...new Set(raw)],
     price: estPrice(t.amenity, raw),
-    hours: t.opening_hours || ''
+    hours: t.opening_hours || '',
+    street: t['addr:street'] || '', branch: t.branch || ''
   };
 }
 
@@ -574,7 +577,30 @@ function statusText(st){
 const stClass = st => st.s === 'open' ? 'open' : st.s === 'closed' ? 'closed' : 'unk';
 const cuisineText = p => [...new Set(p.cuisines.map(c => CUISINE_ZH[c]).filter(Boolean))].join('、');
 const navUrl = p => 'https://www.google.com/maps/dir/?api=1&destination=' + p.lat + ',' + p.lon + '&travelmode=walking';
-const searchUrl = p => 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(p.name + ' ' + p.lat + ',' + p.lon);
+// Google 會忽略查詢字串裡的座標、改找使用者附近的同名店（連鎖店就跳到別家分店），
+// 所以用「店名＋路名」搜尋，並把地圖中心鎖在店家座標
+const gmUrl = (name, branch, road, lat, lon) =>
+  'https://www.google.com/maps/search/' + encodeURIComponent([name, branch, road].filter(Boolean).join(' ')) + '/@' + lat + ',' + lon + ',18z';
+const searchUrl = p => gmUrl(p.name, p.branch, p.street, p.lat, p.lon);
+const gmAttrs = p => ' class="gm" data-name="' + esc(p.name) + '" data-branch="' + esc(p.branch || '') + '" data-road="' + esc(p.street || '') +
+  '" data-lat="' + p.lat + '" data-lon="' + p.lon + '"';
+// 沒有路名的店：點下去時先用座標反查路名，再開 Google 地圖
+document.addEventListener('click', async e => {
+  const a = e.target.closest('a.gm');
+  if (!a || a.dataset.road) return;
+  e.preventDefault();
+  const w = window.open('', '_blank');           // 先同步開分頁，避免被擋彈出視窗
+  const { name, branch, lat, lon } = a.dataset;
+  let road = '';
+  try{
+    const r = await fetch('https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&accept-language=zh-TW&lat=' + lat + '&lon=' + lon);
+    const j = await r.json();
+    road = (j.address && (j.address.road || j.address.pedestrian)) || '';
+  }catch(err){}
+  const url = gmUrl(name, branch, road, lat, lon);
+  a.href = url; a.dataset.road = road || ' ';
+  if (w) w.location.href = url; else location.href = url;
+});
 function rowHtml(p, i){
   const kind = [TYPE_ZH[p.type], cuisineText(p)].filter(Boolean).join(' · ');
   return '<li class="row"><span class="no num">' + String(i + 1).padStart(2, '0') + '</span><div>' +
@@ -583,7 +609,7 @@ function rowHtml(p, i){
     '<span class="price">' + '$'.repeat(p.price) + '</span><span>' + esc(kind) + '</span></div>' +
     (p.hours ? '<div class="hrs">' + esc(zhHours(p.hours)) + '</div>' : '') +
     '<div class="links"><a href="' + navUrl(p) + '" target="_blank" rel="noopener">導航</a>' +
-    '<a href="' + searchUrl(p) + '" target="_blank" rel="noopener">看評價</a></div></div></li>';
+    '<a href="' + searchUrl(p) + '"' + gmAttrs(p) + ' target="_blank">看評價</a></div></div></li>';
 }
 function updateSummary(){
   const prices = checked('#priceChips'), types = checked('#typeChips');
@@ -636,6 +662,9 @@ function tickClock(){
 
 /* ---------- 抽籤 ---------- */
 const LOTS = ['上上', '大吉', '上吉', '中吉'];
+// 直書店名依字數縮放，盡量一行排完不留孤字（每字約佔 1.1em，可用高度約 300px）
+const vname = (name, cls) => '<div class="vname' + (cls || '') + '" style="font-size:' +
+  Math.max(26, Math.min(52, Math.floor(300 / ([...name].length * 1.1)))) + 'px">' + esc(name) + '</div>';
 let rollTimer = null;
 function slipMsg(t){ const box = $('#result'); box.className = 'slip show'; box.innerHTML = '<div class="msg">' + t + '</div>'; box.scrollIntoView({behavior:'smooth', block:'center'}); }
 function draw(){
@@ -656,13 +685,13 @@ function draw(){
   let n = 0;
   rollTimer = setInterval(() => {
     const r = list[Math.floor(Math.random() * list.length)];
-    box.innerHTML = head + '<div class="slip-body"><div class="vname rolling">' + esc(r.name) + '</div></div>';
+    box.innerHTML = head + '<div class="slip-body">' + vname(r.name, ' rolling') + '</div>';
     if (++n >= 14){
       clearInterval(rollTimer);
       box.classList.remove('shake');
       const kind = [TYPE_ZH[pick.type], cuisineText(pick)].filter(Boolean).join('・');
       box.innerHTML = head +
-        '<div class="slip-body"><div class="vname">' + esc(pick.name) + '</div>' +
+        '<div class="slip-body">' + vname(pick.name) +
         '<div class="side"><div class="stamp">' + lot.split('').join('<br>') + '</div><dl>' +
         '<dt>距離</dt><dd class="num">' + fmtDist(pick.dist) + '・步行 ' + walk(pick.dist) + ' 分</dd>' +
         '<dt>營業</dt><dd>' + statusText(pick.st) + '</dd>' +
@@ -670,7 +699,7 @@ function draw(){
         (kind ? '<dt>類型</dt><dd>' + esc(kind) + '</dd>' : '') +
         '</dl></div></div>' +
         '<div class="acts"><a class="btn cream" href="' + navUrl(pick) + '" target="_blank" rel="noopener">就吃這間・導航</a>' +
-        '<a class="btn ghost" href="' + searchUrl(pick) + '" target="_blank" rel="noopener">看評價</a>' +
+        '<a href="' + searchUrl(pick) + '"' + gmAttrs(pick).replace('class="gm"', 'class="gm btn ghost"') + ' target="_blank">看評價</a>' +
         '<button class="btn ghost" id="again">再抽一次</button></div>';
       $('#again').onclick = draw;
       $('#btnDraw').disabled = state.busy;
